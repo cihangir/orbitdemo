@@ -11,7 +11,7 @@ const textField = document.getElementById("text");
 const processButton = document.getElementById("process");
 
 const username = new Date().getTime(); // random username/id
-const dbname = "savas";
+const dbname = "savas_demo";
 
 window.db = null;
 window.log = null;
@@ -109,11 +109,6 @@ const openDatabase = dbname => {
 
     window.ledger = orbit.docstore(dbname + ".ledger");
 
-    window.db = orbit.kvstore(dbname, {
-      maxHistory: 10,
-      syncHistory: false,
-      cachePath: "/orbit-db"
-    });
     window.log = orbit.eventlog(dbname + ".log", {
       maxHistory: 10,
       syncHistory: true,
@@ -133,11 +128,8 @@ const openDatabase = dbname => {
       }
     );
 
-    let count = 0;
-
     const getData = () => {
       const latest = log.iterator({ limit: 10 }).collect();
-      const count = requestCounter.value;
 
       ipfs.pubsub.peers(dbname + ".log").then(peers => {
         const output = `
@@ -171,7 +163,7 @@ const openDatabase = dbname => {
               .join("\n")}
 
             -------------------------------------------------------
-            Total Request Count: ${count}
+            Total Request Count: ${requestCounter.value}
             -------------------------------------------------------
             `;
         elm.innerHTML = output.split("\n").join("<br>");
