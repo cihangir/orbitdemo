@@ -1,9 +1,11 @@
-import { ucs2 } from "punycode";
+"use strict";
 
-("use strict");
+import { getIPFS, getOrbitDB } from "./conns";
 
-const IPFS = require("ipfs-daemon/src/ipfs-browser-daemon");
-const OrbitDB = require("orbit-db");
+import getPeers from "./getPeers";
+
+// import distributeJobs from "./distributeJobs";
+
 const async = require("async");
 
 const elm = document.getElementById("output");
@@ -94,45 +96,42 @@ const consumeResponses = (ledger, processId) => {
 const openDatabase = dbname => {
   elm.innerHTML = "Connecting to system...";
 
-  window.ipfs = new IPFS({
-    IpfsDataDir: "/orbit-db-/examples/browser",
-    SignalServer: "star-signal.cloud.ipfs.team" // IPFS dev server
-  });
+  getIPFS(function(err, ipfs) {
+    if (err) {
+      return handleError(err);
+    }
+    getOrbitDB(username, function(err, orbit) {
+      if (err) {
+        return handleError(err);
+      }
+      elm.innerHTML = "Loading database...";
 
-  ipfs.on("error", e => handleError(e));
+      window.ledger = orbit.docstore(dbname + ".ledger");
 
-  ipfs.on("ready", () => {
-    elm.innerHTML = "Loading database...";
-
-    const orbit = new OrbitDB(ipfs, username);
-    window.orbit = orbit;
-
-    window.ledger = orbit.docstore(dbname + ".ledger");
-
-    window.log = orbit.eventlog(dbname + ".log", {
-      maxHistory: 10,
-      syncHistory: true,
-      cachePath: "/orbit-db"
-    });
-    window.requestCounter = orbit.counter(dbname + ".count", {
-      maxHistory: 10,
-      syncHistory: true,
-      cachePath: "/orbit-db"
-    });
-    window.responseCounter = orbit.counter(
-      dbname + username + ".response.count",
-      {
+      window.log = orbit.eventlog(dbname + ".log", {
         maxHistory: 10,
         syncHistory: true,
         cachePath: "/orbit-db"
-      }
-    );
+      });
+      window.requestCounter = orbit.counter(dbname + ".count", {
+        maxHistory: 10,
+        syncHistory: true,
+        cachePath: "/orbit-db"
+      });
+      window.responseCounter = orbit.counter(
+        dbname + username + ".response.count",
+        {
+          maxHistory: 10,
+          syncHistory: true,
+          cachePath: "/orbit-db"
+        }
+      );
 
-    const getData = () => {
-      const latest = log.iterator({ limit: 10 }).collect();
+      const getData = () => {
+        const latest = log.iterator({ limit: 10 }).collect();
 
-      ipfs.pubsub.peers(dbname + ".log").then(peers => {
-        const output = `
+        ipfs.pubsub.peers(dbname + ".log").then(peers => {
+          const output = `
             -------------------------------------------------------
             Total Word Count: ${responseCounter.value}
             -------------------------------------------------------
@@ -166,40 +165,41 @@ const openDatabase = dbname => {
             Total Request Count: ${requestCounter.value}
             -------------------------------------------------------
             `;
-        elm.innerHTML = output.split("\n").join("<br>");
-      });
-    };
+          elm.innerHTML = output.split("\n").join("<br>");
+        });
+      };
 
-    log.events.on("synced", () => getData());
-    log.events.on("ready", () => {
-      if (processButton.disabled) {
-        processButton.disabled = false;
-      }
-      getData();
+      log.events.on("synced", () => getData());
+      log.events.on("ready", () => {
+        if (processButton.disabled) {
+          processButton.disabled = false;
+        }
+        getData();
+      });
+
+      requestCounter.events.on("synced", () => getData());
+      requestCounter.events.on("ready", () => getData());
+
+      responseCounter.events.on("synced", () => getData());
+      responseCounter.events.on("ready", () => getData());
+
+      ledger.events.on("synced", () => consumeRequests(ledger));
+      ledger.events.on("ready", () => consumeRequests(ledger));
+
+      ledger.events.on("synced", () => consumeResponses(ledger));
+      ledger.events.on("ready", () => consumeResponses(ledger));
+
+      // Start query loop when the databse has loaded its history
+      requestCounter
+        .load(10)
+        .then(() => responseCounter.load(10))
+        .then(() => log.load(10))
+        .then(() => ledger.load(10))
+        .then(() => {
+          const interval = Math.floor(Math.random() * 5000 + 3000);
+          setInterval(getData, interval);
+        });
     });
-
-    requestCounter.events.on("synced", () => getData());
-    requestCounter.events.on("ready", () => getData());
-
-    responseCounter.events.on("synced", () => getData());
-    responseCounter.events.on("ready", () => getData());
-
-    ledger.events.on("synced", () => consumeRequests(ledger));
-    ledger.events.on("ready", () => consumeRequests(ledger));
-
-    ledger.events.on("synced", () => consumeResponses(ledger));
-    ledger.events.on("ready", () => consumeResponses(ledger));
-
-    // Start query loop when the databse has loaded its history
-    requestCounter
-      .load(10)
-      .then(() => responseCounter.load(10))
-      .then(() => log.load(10))
-      .then(() => ledger.load(10))
-      .then(() => {
-        const interval = Math.floor(Math.random() * 5000 + 3000);
-        setInterval(getData, interval);
-      });
   });
 };
 
@@ -224,7 +224,9 @@ const distributeJobs = (username, dbname, processId, peers, chunks) => {
         processId: processId
       };
       log.add(
-        `${username} is sending request ${doc._id} to ${doc.target} on db: ${dbname}`
+        `${username} is sending request ${doc._id} to ${doc.target} on db: ${
+          dbname
+        }`
       );
       ledger
         .put(doc)
@@ -247,7 +249,7 @@ const distributeJobs = (username, dbname, processId, peers, chunks) => {
 const process = (text, username, dbname, processId) => {
   log.add(`${username} starts processing with ${processId}`);
 
-  getPeers(dbname, function(err, peers) {
+  getPeers(ipfs, dbname, function(err, peers) {
     log.add(`${username} fetched the latest peers on db ${dbname}`);
 
     var chunks = chunkString(text, peers.length);
@@ -255,20 +257,13 @@ const process = (text, username, dbname, processId) => {
     distributeJobs(username, dbname, processId, peers, chunks);
 
     log.add(
-      `${username} is creating the jobs with process id ${processId} on db: ${dbname}`
+      `${username} is creating the jobs with process id ${processId} on db: ${
+        dbname
+      }`
     );
 
     console.log("cihangir", err, peers, chunks);
   });
-};
-
-const getPeers = (dbname, callback) => {
-  ipfs.pubsub
-    .peers(dbname + ".log")
-    .then(peers => {
-      return callback(null, peers);
-    })
-    .catch(e => callback(e));
 };
 
 openDatabase(dbname);
