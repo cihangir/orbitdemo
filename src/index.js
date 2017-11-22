@@ -1,280 +1,154 @@
-"use strict";
+'use strict'
 
-import { getIPFS, getOrbitDB } from "./conns";
+import chunkString from './chunkString'
+import consumeRequests from './consumeRequests'
+import consumeResponses from './consumeResponses'
+import distributeJobs from './distributeJobs'
+import { ensureConns } from './conns'
+import generateView from './view'
+import getPeers from './getPeers'
 
-import getPeers from "./getPeers";
+const elm = document.getElementById(`output`)
+const textField = document.getElementById(`text`)
+const processButton = document.getElementById(`process`)
 
-// import distributeJobs from "./distributeJobs";
-
-const async = require("async");
-
-const elm = document.getElementById("output");
-const textField = document.getElementById("text");
-const processButton = document.getElementById("process");
-
-const username = new Date().getTime(); // random username/id
-const dbname = "savas_demo";
-
-window.db = null;
-window.log = null;
-window.requestCounter = null;
-window.responseCounter = null;
-window.ipfs = null;
-window.orbit = null;
-window.ledger = null;
+window.conns = null
 
 const handleError = e => {
-  console.error(e.stack);
-  elm.innerHTML = e.message;
-};
+  console.error(e.stack)
+  elm.innerHTML = e.message
+}
 
-const consumeRequests = ledger => {
-  const all = ledger.query(
-    // doc => true
-    doc => doc.target == ipfs.PeerId && doc.typeConstant == "request"
-  );
-  console.log("consuming ledger", all);
+const openDatabase = (dbname, username) => {
+  elm.innerHTML = `Connecting to system...`
 
-  async.eachOfSeries(
-    all,
-    function(data, count, callback) {
-      ledger
-        .put({
-          _id: data._id + "r",
-          target: data.sender,
-          sender: ipfs.PeerId,
-          processId: data.processId,
-          typeConstant: "response",
-          response: data.request.length
-        })
-        .then(hash => {
-          ledger
-            .del(data._id)
-            .then(hash => callback())
-            .catch(e => callback(e));
-        })
-        .catch(e => callback(e));
-    },
-    function(err) {
-      if (err) {
-        return handleError(err);
-      }
-      console.log("consumed all the logs");
-    }
-  );
-};
-
-const consumeResponses = (ledger, processId) => {
-  const all = ledger.query(
-    // doc => true
-    doc => doc.target == ipfs.PeerId && doc.typeConstant == "response"
-  );
-  console.log("consuming ledger", all);
-
-  async.eachOfSeries(
-    all,
-    function(data, count, callback) {
-      responseCounter
-        .inc(data.response)
-        .then(hash => {
-          ledger
-            .del(data._id)
-            .then(hash => callback())
-            .catch(e => callback(e));
-        })
-        .catch(e => callback(e));
-    },
-    function(err) {
-      if (err) {
-        return handleError(err);
-      }
-      console.log("consumed all the logs");
-    }
-  );
-};
-
-const openDatabase = dbname => {
-  elm.innerHTML = "Connecting to system...";
-
-  getIPFS(function(err, ipfs) {
+  ensureConns(dbname, username, function(err, conns) {
     if (err) {
-      return handleError(err);
+      return handleError(err)
     }
-    getOrbitDB(username, function(err, orbit) {
-      if (err) {
-        return handleError(err);
-      }
-      elm.innerHTML = "Loading database...";
 
-      window.ledger = orbit.docstore(dbname + ".ledger");
+    window.conns = conns
+    elm.innerHTML = `Loading database...`
 
-      window.log = orbit.eventlog(dbname + ".log", {
-        maxHistory: 10,
-        syncHistory: true,
-        cachePath: "/orbit-db"
-      });
-      window.requestCounter = orbit.counter(dbname + ".count", {
-        maxHistory: 10,
-        syncHistory: true,
-        cachePath: "/orbit-db"
-      });
-      window.responseCounter = orbit.counter(
-        dbname + username + ".response.count",
-        {
-          maxHistory: 10,
-          syncHistory: true,
-          cachePath: "/orbit-db"
+    const updateView = conns => {
+      generateView(conns, function(err, view) {
+        if (err) {
+          return handleError(err)
         }
-      );
-
-      const getData = () => {
-        const latest = log.iterator({ limit: 10 }).collect();
-
-        ipfs.pubsub.peers(dbname + ".log").then(peers => {
-          const output = `
-            -------------------------------------------------------
-            Total Word Count: ${responseCounter.value}
-            -------------------------------------------------------
-            -------------------------------------------------------
-            You are: ${username}<br>
-            -------------------------------------------------------
-            Your Peer ID: ${ipfs.PeerId}<br>
-            -------------------------------------------------------
-            Database: ${dbname}<br>
-            -------------------------------------------------------
-            Peers: ${peers.length}<br>
-            -------------------------------------------------------
-            Connected Rope Peer Hashes:
-            -------------------------------------------------------
-            ${peers
-              .reverse()
-              .map(e => e)
-              .join(
-                "\n-------------------------------------------------------\n"
-              )}
-
-            -------------------------------------------------------
-            Latest Requests
-            -------------------------------------------------------
-            ${latest
-              .reverse()
-              .map(e => e.payload.value)
-              .join("\n")}
-
-            -------------------------------------------------------
-            Total Request Count: ${requestCounter.value}
-            -------------------------------------------------------
-            `;
-          elm.innerHTML = output.split("\n").join("<br>");
-        });
-      };
-
-      log.events.on("synced", () => getData());
-      log.events.on("ready", () => {
-        if (processButton.disabled) {
-          processButton.disabled = false;
-        }
-        getData();
-      });
-
-      requestCounter.events.on("synced", () => getData());
-      requestCounter.events.on("ready", () => getData());
-
-      responseCounter.events.on("synced", () => getData());
-      responseCounter.events.on("ready", () => getData());
-
-      ledger.events.on("synced", () => consumeRequests(ledger));
-      ledger.events.on("ready", () => consumeRequests(ledger));
-
-      ledger.events.on("synced", () => consumeResponses(ledger));
-      ledger.events.on("ready", () => consumeResponses(ledger));
-
-      // Start query loop when the databse has loaded its history
-      requestCounter
-        .load(10)
-        .then(() => responseCounter.load(10))
-        .then(() => log.load(10))
-        .then(() => ledger.load(10))
-        .then(() => {
-          const interval = Math.floor(Math.random() * 5000 + 3000);
-          setInterval(getData, interval);
-        });
-    });
-  });
-};
-
-const chunkString = (str, length) => {
-  const max = 50;
-  var n = Math.trunc(str.length / length);
-  n = n > max ? max : n;
-  var res = str.match(new RegExp("(.|[\r\n]){1," + n + "}", "g"));
-  return res;
-};
-
-const distributeJobs = (username, dbname, processId, peers, chunks) => {
-  async.eachOfSeries(
-    chunks,
-    function(chunk, count, callback) {
-      var doc = {
-        _id: ipfs.PeerId + count + "",
-        target: peers[(peers.length - 1) % count || 0],
-        sender: ipfs.PeerId,
-        typeConstant: "request",
-        request: chunk,
-        processId: processId
-      };
-      log.add(
-        `${username} is sending request ${doc._id} to ${doc.target} on db: ${
-          dbname
-        }`
-      );
-      ledger
-        .put(doc)
-        .then(() => requestCounter.inc())
-        .then(hash => {
-          console.log(hash, doc);
-          callback();
-        })
-        .catch(callback);
-    },
-    function(err) {
-      if (err) {
-        return handleError(err);
-      }
-      console.log("distributed all the chunks");
+        elm.innerHTML = view
+      })
     }
-  );
-};
 
-const process = (text, username, dbname, processId) => {
-  log.add(`${username} starts processing with ${processId}`);
+    conns.log.events.on(`synced`, () => updateView(conns))
+    conns.log.events.on(`ready`, () => {
+      if (processButton.disabled) {
+        processButton.disabled = false
+      }
+      updateView(conns)
+    })
+    conns.requestCounter.events.on(`synced`, () => updateView(conns))
+    conns.requestCounter.events.on(`ready`, () => updateView(conns))
 
-  getPeers(ipfs, dbname, function(err, peers) {
-    log.add(`${username} fetched the latest peers on db ${dbname}`);
+    conns.responseCounter.events.on(`synced`, () => updateView(conns))
+    conns.responseCounter.events.on(`ready`, () => updateView(conns))
 
-    var chunks = chunkString(text, peers.length);
+    conns.ledger.events.on(`synced`, () =>
+      consumeRequests(conns, function(err) {
+        if (err) {
+          return handleError(err)
+        }
+        console.log(`consumed all the logs`)
+      })
+    )
+    conns.ledger.events.on(`ready`, () =>
+      consumeRequests(conns, function(err) {
+        if (err) {
+          return handleError(err)
+        }
+        console.log(`consumed all the logs`)
+      })
+    )
 
-    distributeJobs(username, dbname, processId, peers, chunks);
+    conns.ledger.events.on(`synced`, () =>
+      consumeResponses(conns, `id`, function(err) {
+        if (err) {
+          return handleError(err)
+        }
+        console.log(`consumed all the logs`)
+      })
+    )
+    conns.ledger.events.on(`ready`, () =>
+      consumeResponses(conns, `id`, function(err) {
+        if (err) {
+          return handleError(err)
+        }
+        console.log(`consumed all the logs`)
+      })
+    )
 
-    log.add(
-      `${username} is creating the jobs with process id ${processId} on db: ${
-        dbname
-      }`
-    );
+    // Start query loop when the databse has loaded its history
+    conns.requestCounter
+      .load(10)
+      .then(() => conns.responseCounter.load(10))
+      .then(() => conns.log.load(10))
+      .then(() => conns.ledger.load(10))
+      .then(() => {
+        const interval = Math.floor(Math.random() * 5000 + 3000)
+        setInterval(function() {
+          updateView(conns)
+        }, interval)
+      })
+  })
+}
 
-    console.log("cihangir", err, peers, chunks);
-  });
-};
+const process = (conns, text, processId) => {
+  conns.log.add(`${conns.username} starts processing with ${processId}`)
 
-openDatabase(dbname);
+  getPeers(conns, function(err, peers) {
+    if (err) {
+      return handleError(err)
+    }
+    conns.log.add(
+      `${conns.username} fetched the latest peers on db ${conns.dbname}`
+    )
 
-processButton.addEventListener("click", () => {
-  const processId = username + "" + new Date().getTime().toString();
-  log.add(
-    `creating process id ${processId} for ${username} on parent db: ${dbname}`
-  );
+    var chunks = chunkString(text, peers.length)
 
-  const text = textField.value;
-  console.log(text);
-  process(text, username, dbname, processId);
-});
+    distributeJobs(conns, processId, peers, chunks, function(err) {
+      if (err) {
+        return handleError(err)
+      }
+      conns.log.add(
+        `${conns.username} created the jobs with process id ${
+          processId
+        } on db: ${conns.dbname}`
+      )
+      console.log(`distributed all the chunks`)
+    })
+
+    conns.log.add(
+      `${conns.username} is creating the jobs with process id ${
+        processId
+      } on db: ${conns.dbname}`
+    )
+  })
+}
+
+const username = new Date().getTime() // random username/id
+const dbname = `savas_demo`
+
+openDatabase(dbname, username)
+
+processButton.addEventListener(`click`, () => {
+  var conns = window.conns
+  const processId = conns.username + `` + new Date().getTime().toString()
+  conns.log.add(
+    `creating process id ${processId} for ${conns.username} on parent db: ${
+      conns.dbname
+    }`
+  )
+
+  const text = textField.value
+  console.log(text)
+  process(conns, text, processId)
+})

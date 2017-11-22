@@ -1,8 +1,8 @@
-export default function getPeers(ipfs, dbname, callback) {
-  ipfs.pubsub
-    .peers(dbname + ".log")
+export default function getPeers(conns, callback) {
+  conns.ipfs.pubsub
+    .peers(conns.dbname + `.log`)
     .then(peers => {
-      return callback(null, peers);
+      return callback(null, peers)
     })
-    .catch(e => callback(e));
+    .catch(e => callback(e))
 }
